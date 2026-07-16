@@ -1,0 +1,32 @@
+# Raw data — never commit; run the pipeline to regenerate
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local-only working notes and agent tooling — do not publish
+.claude/
+CLAUDE_*.md
+TECHNICAL_NOTES.md
+
+# Python packaging / test caches
+.pytest_cache/
+*.egg-info/
+
+# output/ is intentionally NOT ignored — commit the artefacts
