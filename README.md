@@ -59,8 +59,8 @@ runs aggregate from that in seconds.
  │ OBIS raw dump (GeoParquet,   │─▶ │ build_footprints_raw │──────────────▶│ (adds cells +
  │  AWS Open Data ~91 GB, G:)   │   │  .py (DuckDB, 0.1°)  │─▶ obis_monthly/│  year_counts +
  │                              │   │                      │   <aphiaid>.json  monthly frames)
- │ NOAA OISST v2.1 (PSL OPeNDAP)│─▶ │ fetch_oisst.py       │─▶ │ oisst_grid.npz           │
- │  monthly, global 0.25°       │   │  (global ~0.5° stride)│  │  (months, lats, lons, sst)│
+ │ NOAA OISST v2.1 (AWS Open    │─▶ │ fetch_oisst.py       │─▶ │ oisst_grid.npz           │
+ │  Data, daily, global 0.25°)  │   │  (monthly means, 0.25°)│ │  (months, lats, lons, sst)│
  └──────────────────────────────┘   └──────────────────────┘   └───────────┬──────────────┘
                                                                             │
                                         PROCESS (numpy)                     ▼
@@ -93,7 +93,7 @@ input is missing. `build_footprints_raw` needs the local raw dump (see below).
 |---|---|---|
 | [OBIS](https://api.obis.org) aggregation API | Curated species list + taxonomy + record totals, global density backdrop | none |
 | [OBIS raw dump](https://obis.org/data/access/) (AWS Open Data GeoParquet, `s3://obis-open-data/occurrence`) | Raw occurrences → per-species 0.1° footprint, monthly frames, annual counts | none (anonymous S3) |
-| [NOAA OISST v2.1](https://www.ncei.noaa.gov/products/optimum-interpolation-sst) (monthly, via NOAA PSL OPeNDAP) | Gap-free satellite SST, global 0.25° monthly field | none |
+| [NOAA OISST v2.1](https://www.ncei.noaa.gov/products/optimum-interpolation-sst) (daily files on AWS Open Data, `s3://noaa-cdr-sea-surface-temp-optimum-interpolation-pds`) | Gap-free satellite SST, global 0.25°; monthly means built locally | none (anonymous S3) |
 
 Licensing and attribution: see [`DATA_LICENSE.md`](DATA_LICENSE.md).
 
@@ -165,7 +165,7 @@ Or run steps individually:
 ```bash
 python scripts/fetch_obis.py            # curated species list + density → data/obis_species.json
 python scripts/build_footprints_raw.py  # 0.1° footprint + monthly + annual counts (raw dump, DuckDB)
-python scripts/fetch_oisst.py           # global ~0.5° monthly SST → data/oisst_grid.npz
+python scripts/fetch_oisst.py           # global 0.25° monthly-mean SST → data/oisst_grid.npz
 python scripts/process.py               # join + emit → output/{cells,species,density}.json + monthly/
 python scripts/render_sst_tiles.py      # OISST → output/sst/*.png + field.json (not part of pipeline.py — run after fetch_oisst)
 ```
@@ -192,11 +192,17 @@ the portfolio repo instead. To ship a refresh:
   on land / in brackish water are **kept on purpose** (honest data — e.g. anadromous
   salmonids legitimately sit inland; their SST niche is sampled at the nearest ocean
   cell). No `shoredistance` filter.
-- **OISST striding** — the global monthly field is subset by *striding* the 0.25°
-  OPeNDAP grid (every 2nd cell → ~0.5°). **Gotcha:** a single strided request for the
-  whole time range returns **all-zeros** from the THREDDS server — it must be loaded in
-  month chunks (`TIME_CHUNK`), and individual chunks can hit the same glitch (detected
-  and refetched). Longitudes are converted 0-360 → −180/180 and land (NaN) is preserved.
+- **OISST from AWS, not OPeNDAP** — NOAA PSL's THREDDS server (the pre-aggregated
+  monthly product) rate-limits hard (HTTP 429), so `fetch_oisst.py` builds the monthly
+  means itself from OISST's **daily** files mirrored on AWS Open Data (anonymous S3,
+  no limits), sampling every 3rd day per month with 16 parallel downloads — the
+  standard error of a ~10-day mean is well under 0.1 °C for a colour field. Native
+  0.25° is kept; longitudes are converted 0-360 → −180/180 and land (NaN) preserved.
+- **SST raster tiles** — `render_sst_tiles.py` reprojects each monthly field to Web
+  Mercator (so it aligns pixel-for-pixel with the basemap) with bilinear resampling,
+  and antialiases the coastline by thresholding a 4×-supersampled ocean mask into a
+  continuous alpha channel. PNGs are written by a small pure numpy+zlib encoder — no
+  imaging dependency.
 - **SST join** — `process.py` samples the OISST grid at each species' cell centroids
   (nearest cell) and computes a count-weighted monthly mean and an all-time thermal
   niche (weighted mean + p10/p90 quantiles). Footprint cells are capped at the top 1500
