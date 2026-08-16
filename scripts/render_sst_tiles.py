@@ -55,18 +55,22 @@ STOP_RGB = np.array([
 ], dtype="float64")
 
 
-def _colorize(field: np.ndarray) -> np.ndarray:
-    """(H,W) float SST (NaN=land) → (H,W,4) uint8 RGBA, land fully transparent."""
+def _colorize(field: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """(H,W) float SST + (H,W) 0..1 coverage → (H,W,4) uint8 RGBA. `field` is
+    land-filled so RGB stays sensible under semi-transparent coastal pixels;
+    `alpha` carries the antialiased ocean mask (land fully transparent)."""
     v = np.clip(field, SST_MIN, SST_MAX)
     r = np.interp(v, STOP_T, STOP_RGB[:, 0])
     g = np.interp(v, STOP_T, STOP_RGB[:, 1])
     b = np.interp(v, STOP_T, STOP_RGB[:, 2])
-    ocean = np.isfinite(field)
+    a = np.clip(alpha, 0.0, 1.0)
     rgba = np.zeros((*field.shape, 4), dtype="uint8")
-    rgba[..., 0] = np.where(ocean, r, 0).astype("uint8")
-    rgba[..., 1] = np.where(ocean, g, 0).astype("uint8")
-    rgba[..., 2] = np.where(ocean, b, 0).astype("uint8")
-    rgba[..., 3] = np.where(ocean, 255, 0).astype("uint8")
+    rgba[..., 0] = r.astype("uint8")
+    rgba[..., 1] = g.astype("uint8")
+    rgba[..., 2] = b.astype("uint8")
+    rgba[..., 3] = np.round(a * 255).astype("uint8")
+    # keep RGB at 0 where fully transparent (smaller PNG, no stray colours)
+    rgba[a <= 0.0, :3] = 0
     return rgba
 
 
@@ -105,32 +109,47 @@ def _lerp_axis(A: np.ndarray, idx: np.ndarray, axis: int) -> np.ndarray:
     return a0 * (1 - f.reshape(shape)) + a1 * f.reshape(shape)
 
 
+SUPERSAMPLE = 4   # mask oversampling factor for antialiased coastlines
+
+
 def _to_mercator(field_asc: np.ndarray, lats_asc: np.ndarray,
-                 lons_asc: np.ndarray) -> np.ndarray:
+                 lons_asc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Reproject an equirectangular field (rows = ascending lat, cols = ascending
     lon) onto a Web-Mercator raster (row 0 = north, OUT_H×OUT_W) with **bilinear**
-    resampling for a continuous gradient. Land is filled before interpolation and
-    the ocean mask re-applied after, so the ocean is smooth while coastlines stay
-    defined (no nearest-neighbour blocking)."""
+    resampling for a continuous gradient. Returns `(field, alpha)`.
+
+    The old hard cut (`mask >= 0.5` at output resolution) drew the coastline as a
+    0.25° staircase — visibly "Lego" when the globe is zoomed. Instead the ocean
+    mask is resampled at SUPERSAMPLE× resolution, thresholded there (the 0.5
+    isoline of the bilinear surface is a smooth curve, not a staircase), and
+    box-averaged back down — an antialiased alpha edge that follows the data's
+    real coastline shape. Land is filled before interpolation so RGB under the
+    semi-transparent edge pixels stays sensible."""
     filled = _fill_land(field_asc)
-    mask = np.isfinite(field_asc).astype("float64")
+    mask = np.isfinite(field_asc).astype("float32")
 
     # Fractional source column for each output column (lon is linear in Mercator).
     col_idx = np.linspace(0, field_asc.shape[1] - 1, OUT_W)
+    col_idx_ss = np.linspace(0, field_asc.shape[1] - 1, OUT_W * SUPERSAMPLE)
     filled = _lerp_axis(filled, col_idx, axis=1)
-    mask = _lerp_axis(mask, col_idx, axis=1)
+    mask = _lerp_axis(mask, col_idx_ss, axis=1)
 
     # Fractional source row for each output row (Mercator y → latitude → row).
     y_max = math.log(math.tan(math.pi / 4 + math.radians(MERC_LAT) / 2))
     ys = np.linspace(y_max, -y_max, OUT_H)
+    ys_ss = np.linspace(y_max, -y_max, OUT_H * SUPERSAMPLE)
     lats_out = np.degrees(2.0 * np.arctan(np.exp(ys)) - math.pi / 2)   # north→south
+    lats_out_ss = np.degrees(2.0 * np.arctan(np.exp(ys_ss)) - math.pi / 2)
     row_idx = np.interp(lats_out, lats_asc, np.arange(len(lats_asc)))
+    row_idx_ss = np.interp(lats_out_ss, lats_asc, np.arange(len(lats_asc)))
     filled = _lerp_axis(filled, row_idx, axis=0)
-    mask = _lerp_axis(mask, row_idx, axis=0)
+    mask = _lerp_axis(mask, row_idx_ss, axis=0)
 
-    # Ocean where the resampled mask is majority; NaN (transparent) elsewhere.
-    out = np.where(mask >= 0.5, filled, np.nan)
-    return out
+    # Threshold at supersampled resolution, then box-average down → antialiased
+    # 0..1 coverage per output pixel.
+    hard = (mask >= 0.5).astype("float32")
+    alpha = hard.reshape(OUT_H, SUPERSAMPLE, OUT_W, SUPERSAMPLE).mean(axis=(1, 3))
+    return filled, alpha
 
 
 def _write_png(path: Path, rgba: np.ndarray) -> None:
@@ -176,8 +195,8 @@ def main() -> None:
     print(f"Rendering {len(months)} Mercator tiles {OUT_W}×{OUT_H} "
           f"from a {sst.shape[2]}×{sst.shape[1]} source...")
     for t, ym in enumerate(months):
-        merc = _to_mercator(sst[t], lats, lons)
-        _write_png(OUT_DIR / f"{ym}.png", _colorize(merc))
+        field, alpha = _to_mercator(sst[t], lats, lons)
+        _write_png(OUT_DIR / f"{ym}.png", _colorize(field, alpha))
         if (t + 1) % 24 == 0 or t == len(months) - 1:
             print(f"  {t + 1}/{len(months)}", end="\r", flush=True)
 
@@ -186,7 +205,8 @@ def main() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         mean_field = np.nanmean(sst, axis=0)
-    _write_png(OUT_DIR / "mean.png", _colorize(_to_mercator(mean_field, lats, lons)))
+    mean_merc, mean_alpha = _to_mercator(mean_field, lats, lons)
+    _write_png(OUT_DIR / "mean.png", _colorize(mean_merc, mean_alpha))
 
     meta = {
         "months": months,
