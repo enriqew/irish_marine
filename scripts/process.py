@@ -28,13 +28,23 @@ import numpy as np
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
+MONTHLY_CKPT_DIR = DATA_DIR / "obis_monthly"       # from build_footprints_raw.py
+MONTHLY_OUT_DIR = OUTPUT_DIR / "monthly"           # one file per species
+FOOTPRINT_OUT_DIR = OUTPUT_DIR / "footprints"      # one file per species (all-time)
 
 GROUPS = ["cetacean", "shark", "seal", "fish", "seabird", "other"]
 
 # Cap the cells STORED per species for the map (top-K by count) to bound file
 # size and keep the map legible. The per-species SST series is still computed
-# over the species' FULL footprint, so the thermal signal is unaffected.
-MAX_MAP_CELLS = 800
+# over the species' FULL footprint, so the thermal signal is unaffected. Raised
+# from 800 → 1500 for the finer 0.1° raw-derived footprints (a widespread species
+# occupies many more cells at 0.1° than at the old ~1.4° grid).
+MAX_MAP_CELLS = 1500
+
+# Per-month footprint cap (top-K cells by count in that month). Bounds the size
+# of each per-species monthly file (lazy-loaded from public/, so less critical);
+# raised 400 → 800 alongside the finer 0.1° grid.
+MAX_MONTHLY_CELLS = 800
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +145,76 @@ def _round(x, n=1):
     return None if x is None or (isinstance(x, float) and not math.isfinite(x)) else round(float(x), n)
 
 
+# ---------------------------------------------------------------------------
+# Monthly footprint animation (optional — only if build_footprints_raw.py has run)
+# ---------------------------------------------------------------------------
+
+def build_monthly(species_out: list[dict]) -> int:
+    """Turn per-species monthly checkpoints into self-contained frontend files
+    (output/monthly/<id>.json) and flag which species have them. Returns the
+    count written. Each file bundles its own cell centroids so the frontend
+    needs no cross-reference into cells.json.
+    """
+    if not MONTHLY_CKPT_DIR.exists():
+        print("  (no data/obis_monthly — skipping monthly animation output)")
+        return 0
+
+    by_aphia = {s["aphia_id"]: s for s in species_out if s.get("aphia_id") is not None}
+    MONTHLY_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for old in MONTHLY_OUT_DIR.glob("*.json"):   # drop stale files from earlier runs
+        old.unlink()
+    written_ids: list[int] = []
+
+    for ckpt in sorted(MONTHLY_CKPT_DIR.glob("*.json")):
+        try:
+            doc = json.loads(ckpt.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not doc.get("complete"):
+            continue
+        sp = by_aphia.get(doc.get("aphia_id"))
+        if sp is None:
+            continue   # species not in the published catalog (no all-time cells)
+
+        local: dict[tuple[float, float], int] = {}
+        centroids: list[list[float]] = []
+
+        def cell_id(lng: float, lat: float) -> int:
+            key = (round(lng, 4), round(lat, 4))
+            cid = local.get(key)
+            if cid is None:
+                cid = len(centroids)
+                local[key] = cid
+                centroids.append([key[0], key[1]])
+            return cid
+
+        frames: dict[str, list] = {}
+        for ym, cells in doc.get("frames", {}).items():
+            top = sorted(cells, key=lambda c: c[2], reverse=True)[:MAX_MONTHLY_CELLS]
+            frames[ym] = [[cell_id(c[0], c[1]), int(c[2])] for c in top]
+
+        months = sorted(frames.keys())
+        if not months:
+            continue
+
+        out = {
+            "id": sp["id"],
+            "aphia_id": sp["aphia_id"],
+            "scientific_name": sp["scientific_name"],
+            "months": months,
+            "cells": centroids,
+            "frames": frames,
+        }
+        (MONTHLY_OUT_DIR / f"{sp['id']}.json").write_text(
+            json.dumps(out, ensure_ascii=False), encoding="utf-8")
+        sp["has_monthly"] = True
+        written_ids.append(sp["id"])
+
+    (MONTHLY_OUT_DIR / "index.json").write_text(
+        json.dumps({"ids": sorted(written_ids)}, ensure_ascii=False), encoding="utf-8")
+    return len(written_ids)
+
+
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -198,6 +278,27 @@ def main() -> None:
     for i, s in enumerate(species_out):   # reassign ids after sort
         s["id"] = i
 
+    # --- monthly footprint animation (optional) ------------------------------
+    # Built before species.json so it can set each species' has_monthly flag.
+    n_monthly = build_monthly(species_out)
+    if n_monthly:
+        print(f"  monthly/        {n_monthly} per-species files -> {MONTHLY_OUT_DIR}")
+
+    # --- per-species all-time footprint → lazy files -------------------------
+    # The footprint cell arrays are the bulk of the payload, but only needed when
+    # a species is selected. Emit one small file per species (fetched on select,
+    # like the monthly frames) and strip `cells` from species.json so the catalog
+    # stays small enough to bundle. Both reference cells.json centroids by index.
+    FOOTPRINT_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for old in FOOTPRINT_OUT_DIR.glob("*.json"):
+        old.unlink()
+    for s in species_out:
+        cell_refs = s.pop("cells")
+        (FOOTPRINT_OUT_DIR / f"{s['id']}.json").write_text(
+            json.dumps({"id": s["id"], "cells": cell_refs}, ensure_ascii=False),
+            encoding="utf-8")
+    print(f"  footprints/     {len(species_out)} per-species files -> {FOOTPRINT_OUT_DIR}")
+
     # --- density.json --------------------------------------------------------
     density_out = []
     for lng, lat, cnt in obis.get("density", []):
@@ -218,7 +319,7 @@ def main() -> None:
         "years": years,
         "groups": GROUPS,
         "sources": {
-            "sightings": "OBIS (Ocean Biodiversity Information System) aggregation API",
+            "sightings": "OBIS (Ocean Biodiversity Information System) — aggregation API + raw occurrence dump",
             "sst": "NOAA OISST v2.1 monthly (NOAA PSL)",
         },
         "species": species_out,
@@ -245,7 +346,7 @@ def _write(filename: str, data) -> None:
     path = OUTPUT_DIR / filename
     path.write_text(json.dumps(sanitize(data), ensure_ascii=False), encoding="utf-8")
     size_mb = path.stat().st_size / (1024 * 1024)
-    flag = "  ⚠ >5MB (→ public/data)" if size_mb > 5 else ""
+    flag = "  !! >5MB (-> public/data)" if size_mb > 5 else ""
     print(f"  {filename:<16} {size_mb:>6.2f} MB{flag}")
 
 

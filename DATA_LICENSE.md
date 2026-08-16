@@ -7,20 +7,19 @@ keep the attributions.
 
 | Source | Used for | Licence | Attribution |
 |---|---|---|---|
-| **OBIS** — Ocean Biodiversity Information System | `sightings.json`, `species.json`, `seasonal-summary.json` | CC BY 4.0 | OBIS (2026) Ocean Biodiversity Information System. Intergovernmental Oceanographic Commission of UNESCO. https://obis.org |
-| **Marine Institute Ireland** — Irish Weather Buoy Network (ERDDAP `IWBNetwork`) | `sea-temperature.json` | CC BY 4.0 | Contains Irish public sector data from the Marine Institute, licensed under CC BY 4.0. https://erddap.marine.ie |
-| **NOAA** — Optimum Interpolation SST (OISST) v2.1, monthly means (served by NOAA PSL) | `sst-grid.json` | Public domain (U.S. Government work) | NOAA/NCEI OISST v2.1, monthly product via NOAA PSL. Huang et al. (2021), J. Climate. https://psl.noaa.gov/data/gridded/data.noaa.oisst.v2.highres.html |
-| **EEA** — Natura 2000 (end 2022) | `protected-areas.json` | EEA standard reuse policy (CC BY 4.0) | © European Environment Agency (EEA). Natura 2000 data. https://www.eea.europa.eu |
-| **Natural Earth** — 1:10m land polygons | Coastline reference for the marine/coastal filter (not published) | Public domain | Made with Natural Earth. https://www.naturalearthdata.com |
+| **OBIS** — Ocean Biodiversity Information System, aggregation API (`api.obis.org`) | Curated species list + taxonomy + record totals (`species.json`), global density backdrop (`density.json`) | CC BY 4.0 | OBIS (2026) Ocean Biodiversity Information System. Intergovernmental Oceanographic Commission of UNESCO. https://obis.org |
+| **OBIS** — raw occurrence dump (AWS Open Data GeoParquet, `s3://obis-open-data/occurrence`) | Per-species 0.1° footprints (`footprints/*.json`), monthly frames (`monthly/*.json`), annual counts, cell index (`cells.json`) | CC BY 4.0 | Same as above; the GeoParquet export on AWS Open Data is OBIS's sanctioned bulk-access path. https://obis.org/data/access/ |
+| **NOAA** — Optimum Interpolation SST (OISST) v2.1, monthly means (served by NOAA PSL OPeNDAP) | Per-species SST series + thermal niches (`series_sst` / `niche` in `species.json`), SST raster tiles (`sst/*.png`, `sst/field.json`) | Public domain (U.S. Government work) | NOAA/NCEI OISST v2.1, monthly product via NOAA PSL. Huang et al. (2021), J. Climate. https://psl.noaa.gov/data/gridded/data.noaa.oisst.v2.highres.html |
 
 ## Notes
 
-- Individual OBIS occurrence records originate from many contributing datasets,
-  each with its own citation. The aggregate is redistributed here under CC BY 4.0
-  with attribution to OBIS; consult the OBIS portal for dataset-level citations.
-- The Natural Earth land polygon is only used at build time to filter protected
-  areas to coastal/marine sites. It is not included in the published artefacts.
+- Individual OBIS occurrence records originate from thousands of contributing
+  datasets, each with its own citation. The aggregates here (counts per 0.1°
+  cell — no verbatim records, no dataset-level fields) are redistributed under
+  CC BY 4.0 with attribution to OBIS; consult the OBIS portal for dataset-level
+  citations.
 - NOAA OISST is a U.S. Government work in the public domain, with no use
   restrictions. Attribution is a courtesy, and the data carry the standard NOAA
-  disclaimer that they are not intended for legal/navigational use. `sst-grid.json`
-  is a monthly-mean time series (2015→present) subset to the Ireland box at 0.25°.
+  disclaimer that they are not intended for legal/navigational use. The tiles
+  and per-species series are monthly means (2015→present) on the global 0.25°
+  grid (strided to ~0.5° for the join).

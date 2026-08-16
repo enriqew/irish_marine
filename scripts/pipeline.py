@@ -3,14 +3,23 @@
 pipeline.py — Run the full Marine Atlas data pipeline end to end.
 
 Execution order:
-  1. fetch_obis.py   — build the curated global species snapshot from OBIS
-                       aggregation endpoints (footprint grid + annual counts)
-  2. fetch_oisst.py  — download the global ~1° monthly NOAA OISST SST field
-  3. process.py      — join SST to each species' cells and emit output/*.json
+  1. fetch_obis.py            — curated global species LIST + density backdrop
+                                from OBIS aggregation endpoints
+  2. build_footprints_raw.py  — per-species footprint (all-time + MONTHLY) +
+                                annual counts from the raw OBIS dump (0.1° grid);
+                                one local scan, replaces the grid + monthly APIs
+  3. fetch_oisst.py           — download the global ~1° monthly NOAA OISST field
+  4. process.py               — join SST to each species' cells and emit
+                                output/*.json (incl. output/monthly/*.json)
 
-The two fetch steps are independent; a fetch failure is reported but processing
-continues with whatever was downloaded (process.py errors out if a required
-input is missing).
+Step 2 needs the ~91 GB raw OBIS dump under G:\obis_raw (one-time aws s3 sync);
+it builds a fast subset on first run. Fetch failures are reported but non-fatal;
+process.py errors out only if a required input is missing.
+
+SST RASTER TILES (separate): scripts/render_sst_tiles.py turns the OISST grid
+into colour PNGs (land transparent) → output/sst/<YYYY-MM>.png + mean.png +
+field.json, the temperature *surface* the frontend shows as an ImageOverlay.
+Run after fetch_oisst.py; copy output/sst/ into public/data/marine-atlas/sst/.
 """
 
 import sys
@@ -21,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import fetch_obis
+import build_footprints_raw
 import fetch_oisst
 import process
 
@@ -46,8 +56,11 @@ def main() -> None:
 
     results = {
         "OBIS snapshot": _run_step("OBIS snapshot", fetch_obis.main),
-        "OISST field": _run_step("OISST field", fetch_oisst.main),
     }
+    if results["OBIS snapshot"]:
+        results["Raw footprints"] = _run_step(
+            "Raw footprints (all-time + monthly)", build_footprints_raw.main)
+    results["OISST field"] = _run_step("OISST field", fetch_oisst.main)
     results["Process"] = _run_step("Process -> output/", process.main)
     if not results["Process"]:
         print("\nPipeline aborted: processing step failed.")

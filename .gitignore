@@ -29,4 +29,9 @@ TECHNICAL_NOTES.md
 .pytest_cache/
 *.egg-info/
 
-# output/ is intentionally NOT ignored — commit the artefacts
+# output/: commit the three small core JSONs; the per-species and raster
+# artefacts (~125 MB, fully regenerable, versioned in the portfolio repo)
+# stay out of git
+output/footprints/
+output/monthly/
+output/sst/

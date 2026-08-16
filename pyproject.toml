@@ -3,24 +3,24 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "irish-marine-dashboard"
+name = "marine-atlas-pipeline"
 version = "0.1.0"
-description = "Data pipeline that turns Irish marine biodiversity sources (OBIS, Marine Institute ERDDAP, NOAA OISST, EEA Natura 2000) into static JSON artefacts for an interactive map."
+description = "Data pipeline that turns global marine biodiversity sources (OBIS aggregation API + raw OBIS GeoParquet, NOAA OISST) into static JSON artefacts for the interactive Marine Atlas dashboard."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "Enrique Redonda" }]
-keywords = ["marine", "biodiversity", "etl", "geospatial", "obis", "erddap", "oisst", "ireland"]
+keywords = ["marine", "biodiversity", "etl", "geospatial", "obis", "oisst", "duckdb"]
 
 dependencies = [
     "httpx==0.28.1",
+    "duckdb==1.5.4",
     "pandas==3.0.2",
-    "geopandas==1.1.3",
-    "shapely==2.1.2",
     "xarray==2026.7.0",
     "netCDF4==1.7.4",
     "cftime==1.6.5",
     "numpy==2.4.4",
+    "s3fs==2026.6.0",
 ]
 
 [project.optional-dependencies]

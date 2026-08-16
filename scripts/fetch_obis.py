@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-fetch_obis.py — Build the curated global species snapshot from OBIS aggregation
-endpoints (no bulk occurrence download).
+fetch_obis.py — Build the curated global species LIST + a global density backdrop
+from OBIS aggregation endpoints (no bulk occurrence download).
 
 OBIS holds ~201 M occurrence records / ~168 k species. Downloading raw records
-globally is ~400 GB and pointless for this dashboard, because OBIS already
-aggregates server-side:
+globally is ~400 GB, so we use OBIS's server-side aggregation:
 
   * /checklist?scientificname=<taxon>   → species under a taxon, each with a
         total ``records`` count and full WoRMS taxonomy. Used to assemble a
         curated, data-driven species list (top-N by records per group).
-  * /occurrence/grid/{precision}?taxonid=<id>  → GeoJSON grid of per-cell counts
-        for a species (precision 3 ≈ 1.4° cells). This is the species' map
-        footprint. Aggregated over ALL of OBIS, not a downloaded subset.
-  * /statistics/years?taxonid=<id>      → annual occurrence counts for a species.
+  * /occurrence/grid/2 (all species)    → one coarse global density backdrop.
 
-So the whole OBIS side is a few requests per species (~2), not a multi-GB pull.
-Output: data/obis_species.json — the curated list with taxonomy, per-cell
-footprint, and annual counts, ready for the SST join in process.py.
+Output: data/obis_species.json — the curated list with taxonomy + record totals,
+plus the density backdrop. The per-species footprint (``cells``) and annual counts
+(``year_counts``) are added afterwards by ``build_footprints_raw.py`` from the raw
+OBIS dump (a finer 0.1° grid than the old grid API gave), so they are NOT fetched
+here. ``process.py`` then joins SST and emits the frontend artifacts.
 
 API docs: https://api.obis.org
 """
@@ -67,28 +65,35 @@ CURATED_TAXA: list[tuple[str, str, int]] = [
 ]
 
 START_YEAR = 2015          # annual count axis start (aligns with the OISST era)
-GRID_PRECISION = 3         # ~1.4° cells — good global map resolution
 PAGE_SIZE = 500            # /checklist pagination
 POLITE_SLEEP = 0.25        # seconds between requests
 RETRY_WAIT = 3.0
 
 
+_RETRIES = 6
+
+
 def _get(client: httpx.Client, path: str, params: dict | None = None) -> dict | list:
     url = f"{BASE}/{path}"
-    for attempt in range(4):
+    for attempt in range(_RETRIES):
         try:
             resp = client.get(url, params=params or {}, timeout=120)
-            if resp.status_code == 429:
-                print(f"    rate-limited; waiting {RETRY_WAIT}s")
-                time.sleep(RETRY_WAIT)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                wait = RETRY_WAIT * (attempt + 1)
+                print(f"    HTTP {resp.status_code}; waiting {wait:.0f}s")
+                time.sleep(wait)
                 continue
             resp.raise_for_status()
             return resp.json()
-        except httpx.TimeoutException:
-            if attempt == 3:
+        # TransportError covers timeouts AND connection drops (RemoteProtocolError,
+        # ConnectError, ReadError…) — OBIS occasionally disconnects mid-response, and
+        # a single drop must not kill a multi-hour run. Back off and retry.
+        except httpx.TransportError as exc:
+            if attempt == _RETRIES - 1:
                 raise
-            print(f"    timeout (attempt {attempt + 1}); retrying")
-            time.sleep(2)
+            wait = 2 * (attempt + 1)
+            print(f"    {type(exc).__name__} (attempt {attempt + 1}); retrying in {wait}s")
+            time.sleep(wait)
     raise RuntimeError(f"failed after retries: {url}")
 
 
@@ -154,7 +159,7 @@ def build_species_list(client: httpx.Client) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Per-species footprint (grid) + annual counts
+# 2. Global all-species density backdrop (one request)
 # ---------------------------------------------------------------------------
 
 def _cell_centroid(feature: dict) -> tuple[float, float]:
@@ -166,36 +171,6 @@ def _cell_centroid(feature: dict) -> tuple[float, float]:
         round((min(lngs) + max(lngs)) / 2, 4),
         round((min(lats) + max(lats)) / 2, 4),
     )
-
-
-def fetch_footprint(client: httpx.Client, taxon_id: int) -> list[list]:
-    """List of [lng, lat, count] cells for a species at GRID_PRECISION."""
-    payload = _get(client, f"occurrence/grid/{GRID_PRECISION}", {"taxonid": taxon_id})
-    cells = []
-    for f in payload.get("features", []):
-        n = f.get("properties", {}).get("n", 0)
-        if not n:
-            continue
-        lng, lat = _cell_centroid(f)
-        cells.append([lng, lat, int(n)])
-    return cells
-
-
-def fetch_year_counts(client: httpx.Client, taxon_id: int) -> dict[str, int]:
-    """Annual occurrence counts from START_YEAR onward."""
-    payload = _get(client, "statistics/years", {"taxonid": taxon_id})
-    out: dict[str, int] = {}
-    if isinstance(payload, list):
-        for rec in payload:
-            year = rec.get("year")
-            if year is not None and year >= START_YEAR:
-                out[str(year)] = int(rec.get("records", 0))
-    return out
-
-
-# ---------------------------------------------------------------------------
-# 3. Global all-species density backdrop (one request)
-# ---------------------------------------------------------------------------
 
 def fetch_density(client: httpx.Client) -> list[list]:
     """Coarse global grid of ALL-species record counts, for the idle backdrop."""
@@ -223,23 +198,12 @@ def main() -> None:
         species = build_species_list(client)
         print(f"  -> {len(species)} curated species\n")
 
-        print("Fetching per-species footprint + annual counts...")
-        for i, sp in enumerate(species, 1):
-            tid = sp["taxon_id"]
-            sp["cells"] = fetch_footprint(client, tid)
-            time.sleep(POLITE_SLEEP)
-            sp["year_counts"] = fetch_year_counts(client, tid)
-            time.sleep(POLITE_SLEEP)
-            if i % 25 == 0 or i == len(species):
-                print(f"  {i}/{len(species)}  {sp['scientific_name']:<32} "
-                      f"{len(sp['cells'])} cells", flush=True)
-
         density = fetch_density(client)
 
     out = {
         "generated": time.strftime("%Y-%m-%d"),
-        "grid_precision": GRID_PRECISION,
         "start_year": START_YEAR,
+        # Per-species `cells` + `year_counts` are added by build_footprints_raw.py.
         "species": species,
         "density": density,
     }
@@ -248,6 +212,7 @@ def main() -> None:
     size_mb = out_path.stat().st_size / (1024 * 1024)
     print(f"\n  Saved -> {out_path}  ({size_mb:.1f} MB, {len(species)} species, "
           f"{len(density)} density cells)")
+    print("  Next: build_footprints_raw.py (footprints + annual + monthly from raw dump)")
 
 
 if __name__ == "__main__":
