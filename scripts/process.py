@@ -8,10 +8,13 @@ Inputs (data/):
   oisst_grid.npz     — global ~1° monthly SST field
 
 Outputs (output/):
-  cells.json    — deduplicated grid-cell centroids; occurrences reference the index
+  cells.json    — grid-cell centroids for the DENSITY backdrop (index == cell id)
   species.json  — catalog + per-species monthly SST series (seasonal, over its
                   range) + annual counts + thermal niche  (the correlation data)
   density.json  — global all-species per-cell totals + mean SST (idle backdrop)
+  footprints/   — one file per species: ALL its cells, self-contained
+                  [lng, lat, count] triplets (uncapped since 2026-08-21)
+  monthly/      — one file per species with monthly frames (uncapped)
 
 The key computed quantity is, per species, the monthly mean SST *over the cells
 where that species occurs* (count-weighted). That is the temperature-as-temporal
@@ -34,17 +37,11 @@ FOOTPRINT_OUT_DIR = OUTPUT_DIR / "footprints"      # one file per species (all-t
 
 GROUPS = ["cetacean", "shark", "seal", "fish", "seabird", "other"]
 
-# Cap the cells STORED per species for the map (top-K by count) to bound file
-# size and keep the map legible. The per-species SST series is still computed
-# over the species' FULL footprint, so the thermal signal is unaffected. Raised
-# from 800 → 1500 for the finer 0.1° raw-derived footprints (a widespread species
-# occupies many more cells at 0.1° than at the old ~1.4° grid).
-MAX_MAP_CELLS = 1500
-
-# Per-month footprint cap (top-K cells by count in that month). Bounds the size
-# of each per-species monthly file (lazy-loaded from public/, so less critical);
-# raised 400 → 800 alongside the finer 0.1° grid.
-MAX_MONTHLY_CELLS = 800
+# Footprints are UNCAPPED (2026-08-21): every cell of every species ships. The old
+# top-K-by-count caps (MAX_MAP_CELLS / MAX_MONTHLY_CELLS) made effort-dominated
+# species lie by omission — e.g. Larus fuscus lost nearly all of Ireland because
+# Belgian GPS-tracking cells monopolised the top 1500. Footprint and monthly files
+# are lazy-loaded per species, so size is bounded per selection, not per build.
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +187,8 @@ def build_monthly(species_out: list[dict]) -> int:
 
         frames: dict[str, list] = {}
         for ym, cells in doc.get("frames", {}).items():
-            top = sorted(cells, key=lambda c: c[2], reverse=True)[:MAX_MONTHLY_CELLS]
-            frames[ym] = [[cell_id(c[0], c[1]), int(c[2])] for c in top]
+            ordered = sorted(cells, key=lambda c: c[2], reverse=True)
+            frames[ym] = [[cell_id(c[0], c[1]), int(c[2])] for c in ordered]
 
         months = sorted(frames.keys())
         if not months:
@@ -232,7 +229,8 @@ def main() -> None:
     print(f"  {len(obis['species'])} species, {len(months)} SST months")
 
     years = list(range(obis.get("start_year", 2015), date.today().year + 1))
-    cells = CellIndex()
+    cells = CellIndex()               # density backdrop only (footprints are self-contained)
+    universe: set[tuple[float, float]] = set()   # distinct footprint cells, for meta
 
     # --- species.json --------------------------------------------------------
     species_out = []
@@ -248,10 +246,13 @@ def main() -> None:
         # SST series/niche use the FULL footprint (all cells).
         series, sst_mean, sst_p10, sst_p90, amp = grid.series_over_cells(yi, xi, counts)
 
-        # Store only the top-K cells by count for the map (bounds size + clutter).
-        top = np.argsort(counts)[::-1][:MAX_MAP_CELLS]
-        cell_refs = [[cells.get(float(lngs[k]), float(lats[k])), int(counts[k])]
-                     for k in top]
+        # ALL cells, count-desc (draw order: big first, small on top), self-contained
+        # [lng, lat, count] — no cells.json cross-reference (the shared index would
+        # balloon to ~2M centroids at the full universe).
+        order = np.argsort(counts)[::-1]
+        cell_refs = [[float(lngs[k]), float(lats[k]), int(counts[k])] for k in order]
+        universe.update((round(float(lngs[k]), 4), round(float(lats[k]), 4))
+                        for k in order)
 
         yc = {y: sp.get("year_counts", {}).get(str(y), 0) for y in years}
         present_years = [y for y in years if yc[y] > 0]
@@ -286,9 +287,9 @@ def main() -> None:
 
     # --- per-species all-time footprint → lazy files -------------------------
     # The footprint cell arrays are the bulk of the payload, but only needed when
-    # a species is selected. Emit one small file per species (fetched on select,
-    # like the monthly frames) and strip `cells` from species.json so the catalog
-    # stays small enough to bundle. Both reference cells.json centroids by index.
+    # a species is selected. Emit one file per species (fetched on select, like the
+    # monthly frames) and strip `cells` from species.json so the catalog stays
+    # small enough to bundle. Files are self-contained [lng, lat, count] triplets.
     FOOTPRINT_OUT_DIR.mkdir(parents=True, exist_ok=True)
     for old in FOOTPRINT_OUT_DIR.glob("*.json"):
         old.unlink()
@@ -307,7 +308,7 @@ def main() -> None:
         sm = float(grid.cell_mean[yi[0], xi[0]])
         density_out.append([cid, int(cnt), _round(sm)])
 
-    # --- cells.json ----------------------------------------------------------
+    # --- cells.json (density backdrop only) ----------------------------------
     cells_out = {
         "grid_precision": obis.get("grid_precision", 3),
         "cells": cells.centroids,   # index == cell id, [lng, lat]
@@ -317,6 +318,7 @@ def main() -> None:
         "generated": obis.get("generated", date.today().strftime("%Y-%m-%d")),
         "months": months,
         "years": years,
+        "cell_universe": len(universe),   # distinct 0.1° cells across all footprints
         "groups": GROUPS,
         "sources": {
             "sightings": "OBIS (Ocean Biodiversity Information System) — aggregation API + raw occurrence dump",
@@ -329,8 +331,9 @@ def main() -> None:
     _write("species.json", species_doc)
     _write("density.json", {"cells": density_out})
 
-    print(f"\n  {len(species_out)} species, {len(cells.centroids)} unique cells, "
-          f"{len(density_out)} density cells")
+    foot_bytes = sum(p.stat().st_size for p in FOOTPRINT_OUT_DIR.glob("*.json"))
+    print(f"\n  {len(species_out)} species, {len(universe):,} distinct footprint cells "
+          f"(footprints/ {foot_bytes / 1e6:.1f} MB), {len(density_out)} density cells")
 
 
 def _write(filename: str, data) -> None:
