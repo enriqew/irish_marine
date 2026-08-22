@@ -107,11 +107,11 @@ directly; the per-species files and the SST tiles are served lazily from
 
 | File | Size | Description |
 |---|---|---|
-| `cells.json` | ~0.4-3 MB | Deduplicated 0.1° cell centroids `[[lng, lat], …]`; occurrences reference the array index as `cell_id`. |
-| `species.json` | ~0.8 MB | Catalog of ~636 curated species: taxonomy, annual `year_counts`, monthly `series_sst`, thermal niche `{mean, p10, p90, amp}`, `cell_count`, `has_monthly`. Plus shared `months[]` / `years[]` axes. **Footprint cells are NOT here** (see below). |
-| `footprints/<id>.json` | small each | Per-species all-time footprint cells `[cell_id, count]` (top-1500), split out of `species.json` (at 0.1° they're ~8 MB total) — lazy-loaded when a species is selected. |
+| `cells.json` | ~0.02 MB | 0.1° cell centroids `[[lng, lat], …]` for the **density backdrop only** — `density.json` references the array index as `cell_id`. (Footprint files carry their own coordinates; see below.) |
+| `species.json` | ~0.8 MB | Catalog of ~636 curated species: taxonomy, annual `year_counts`, monthly `series_sst`, thermal niche `{mean, p10, p90, amp}`, `cell_count`, `has_monthly`. Plus shared `months[]` / `years[]` axes and `cell_universe` (the distinct-cell total across all species). **Footprint cells are NOT here** (see below). |
+| `footprints/<id>.json` | ~48 MB total | Per-species all-time footprint, **self-contained and uncapped** — every 0.1° cell as `[lng, lat, count]`, sorted by count descending so the map draws dense cells first and sparse ones stay on top. Largest is the southern elephant seal at ~3.7 MB / 206 k cells. Lazy-loaded when a species is selected. |
 | `density.json` | ~0.02 MB | Global all-species grid `[cell_id, total_count, sst_mean]` — the idle backdrop. |
-| `monthly/<id>.json` | small each | Per-species monthly footprint frames (`{month: [[cell, count], …]}`), lazy-loaded by the dashboard for the map's month-by-month animation. |
+| `monthly/<id>.json` | ~11 MB total | Per-species monthly footprint frames (`{month: [[lng, lat, count], …]}`, self-contained, uncapped), lazy-loaded by the dashboard for the map's month-by-month animation. |
 | `sst/<YYYY-MM>.png` + `sst/mean.png` | ~0.5-1 MB each | The OISST field rendered as colour PNG tiles (land transparent, Web-Mercator-aligned) — the temperature *surface* the map drapes on the globe, swapped per month as the timeline plays. From `render_sst_tiles.py`. |
 | `sst/field.json` | tiny | Tile metadata: months, overlay bounds, temperature range. Shipped bundled as `sst-field.json`. |
 
@@ -172,7 +172,7 @@ python scripts/render_sst_tiles.py      # OISST → output/sst/*.png + field.jso
 
 Intermediates land in `data/` (git-ignored). Of the artefacts in `output/`, only the
 three core JSONs are committed here; the per-species and raster files (`footprints/`,
-`monthly/`, `sst/` — ~125 MB, fully regenerable) are git-ignored and live versioned in
+`monthly/`, `sst/` — ~177 MB, fully regenerable) are git-ignored and live versioned in
 the portfolio repo instead. To ship a refresh:
 `output/{cells,species,density}.json` → portfolio `src/data/marine-atlas/` (bundled),
 `output/sst/field.json` → `src/data/marine-atlas/sst-field.json` (bundled), and
@@ -205,8 +205,11 @@ the portfolio repo instead. To ship a refresh:
   imaging dependency.
 - **SST join** — `process.py` samples the OISST grid at each species' cell centroids
   (nearest cell) and computes a count-weighted monthly mean and an all-time thermal
-  niche (weighted mean + p10/p90 quantiles). Footprint cells are capped at the top 1500
-  by count for the map, but the SST series uses the species' full footprint.
+  niche (weighted mean + p10/p90 quantiles). Footprints ship **uncapped** — every cell
+  of every species — and the SST series uses the same full footprint. (An earlier
+  top-1500-cells-per-species cap hid genuinely occupied but under-sampled regions, e.g.
+  Ireland for the lesser black-backed gull, whose records are dominated by one Belgian
+  GPS-tracking dataset; removed 2026-08-21, see `docs/marine-atlas-uncapped-footprints-plan.md`.)
 - **NaN/Inf sanitisation** — all outputs are sanitised so the JSON is always valid.
 
 ---
