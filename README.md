@@ -1,5 +1,7 @@
 # Marine Atlas — data pipeline
 
+**[▶ Live demo](https://eredonda.com/projects/marine-atlas?utm_source=github&utm_medium=referral&utm_campaign=marine-atlas-repo)** — the interactive 3D globe these artefacts power.
+
 A Python pipeline that builds a **global, species-centric** marine-biodiversity
 dataset from open data and writes small, static JSON artefacts that power an
 interactive MapLibre GL dashboard. It queries OBIS's **server-side aggregation
@@ -9,9 +11,10 @@ grid), then joins each species to the NOAA OISST satellite sea-surface-temperatu
 field.
 
 This repository is **data + processing only** — no UI. The dashboard that consumes
-these artefacts lives in a separate portfolio project (`data-dive-design-hub`,
-component `src/components/MarineAtlas/`). The contract between the two is the schema
-of the files in `output/` (documented there in `docs/marine-atlas-data-schema.md`).
+these artefacts is [live here](https://eredonda.com/projects/marine-atlas?utm_source=github&utm_medium=referral&utm_campaign=marine-atlas-repo)
+and lives in a separate portfolio project (`data-dive-design-hub`, component
+`src/components/MarineAtlas/`). The contract between the two is the schema of the
+files in `output/` (documented there in `docs/marine-atlas-data-schema.md`).
 
 > The repository directory is still named `irish_marine` for historical reasons —
 > the project began as an Ireland-only dashboard and was re-scoped to the global
